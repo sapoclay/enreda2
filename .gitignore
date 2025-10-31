@@ -1,0 +1,74 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribución / empaquetado
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Entorno Virtual
+.venv/
+venv/
+ENV/
+env/
+.virtualenv/
+
+# IDE archivos
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Archivos de configuración con datos solo del usuario
+config.json
+
+# OS archivos específicos
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Test 
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre tipo comprobador
+.pyre/
+
+# Proyecto específico
+networking/__pycache__/
