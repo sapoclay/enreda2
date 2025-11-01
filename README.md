@@ -10,10 +10,6 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![CustomTkinter](https://img.shields.io/badge/CustomTkinter-5.2.2+-orange.svg)
 
-**Herramienta profesional de escaneo y gestión de redes con interfaz gráfica moderna**
-
-[Características](#-características) • [Instalación](#-instalación) • [Uso](#-uso) • [Documentación](#-documentación) • [Contribuir](#-contribuir)
-
 </div>
 
 ---
