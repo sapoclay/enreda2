@@ -1,5 +1,8 @@
 # 🌐 enredA2 - Network Scanner
 
+<div align="right">
+<img width="1024" height="1536" alt="splash" src="https://github.com/user-attachments/assets/84f97be3-a46c-4992-9d82-d16eba9e63f7" />
+</div>
 <div align="center">
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
@@ -283,20 +286,20 @@ Opciones → Preferencias → Pestaña "💬 Mensajería" → Seleccionar métod
 ## 📸 Capturas de pantalla
 
 ### Ventana principal
-![Ventana Principal](docs/screenshots/main-window.png)
-*Interfaz principal con resultados de escaneo*
+<img width="759" height="592" alt="bandeja-principal" src="https://github.com/user-attachments/assets/10000406-088a-40c5-a046-6b3e6e3fe3e3" />
+
 
 ### Escaneo profundo
-![Escaneo Profundo](docs/screenshots/deep-scan.png)
-*Análisis de seguridad con detección de vulnerabilidades*
+<img width="892" height="1094" alt="escaneo-profundo" src="https://github.com/user-attachments/assets/6df0f825-0ccb-4cd0-8592-92ac0bbeb255" />
+
 
 ### Mensajería múltiple
-![Mensajería](docs/screenshots/messaging.png)
-*Envío de mensajes a múltiples dispositivos*
+<img width="780" height="616" alt="envio-mensajeria-multiple" src="https://github.com/user-attachments/assets/986a2fec-81b8-4df1-ac7f-8365efd4a516" />
+
 
 ### Preferencias
-![Preferencias](docs/screenshots/preferences.png)
-*Configuración de temas y métodos de mensajería*
+<img width="758" height="591" alt="preferencias" src="https://github.com/user-attachments/assets/333f039d-6c4c-4412-8aa2-1a7cb7f86754" />
+
 
 ---
 
@@ -478,3 +481,4 @@ Esta herramienta está diseñada para uso legítimo en redes de tu propiedad o c
 [⬆ Volver arriba](#-enreda2---network-scanner)
 
 </div>
+
