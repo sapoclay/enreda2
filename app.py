@@ -842,7 +842,7 @@ class Aplicacion:
         """Muestra el diálogo para enviar mensaje a múltiples dispositivos."""
         ventana = ctk.CTkToplevel(self.raiz)
         ventana.title(f"Enviar mensaje a {len(direcciones_ip)} dispositivos")
-        ventana.geometry("700x550")
+        ventana.geometry("700x700")
         ventana.resizable(False, False)
         
         # Configurar como modal de forma segura
@@ -853,7 +853,7 @@ class Aplicacion:
         pantalla_ancho = ventana.winfo_screenwidth()
         pantalla_alto = ventana.winfo_screenheight()
         ancho = 700
-        alto = 550
+        alto = 700
         posicion_x = int((pantalla_ancho - ancho) / 2)
         posicion_y = int((pantalla_alto - alto) / 2)
         ventana.geometry(f"{ancho}x{alto}+{posicion_x}+{posicion_y}")
