@@ -116,6 +116,7 @@
 ### Sistema Operativo
 
 - Windows 10 / 11 (64-bit)
+- Ubuntu 22.04
 - Permisos de administrador (recomendado para algunas funcionalidades)
 
 ### Software
@@ -303,16 +304,6 @@ Opciones → Preferencias → Pestaña "💬 Mensajería" → Seleccionar métod
 
 ---
 
-## 📚 Documentación
-
-La aplicación incluye documentación completa en archivos Markdown:
-
-- **[CHANGELOG.md](CHANGELOG.md)** - Historial de cambios y nuevas funcionalidades
-- **[INSTRUCCIONES_NMAP.md](INSTRUCCIONES_NMAP.md)** - Instalación y uso de Nmap
-- **[SOLUCION_PROBLEMAS_MENSAJERIA.md](SOLUCION_PROBLEMAS_MENSAJERIA.md)** - Guía de errores comunes de mensajería
-- **[GUIA_CONEXION_SSH.md](GUIA_CONEXION_SSH.md)** - Guía completa de conexiones SSH
-- **[ICONO_BANDEJA.md](ICONO_BANDEJA.md)** - Uso del icono de bandeja del sistema
-
 ### Ayuda integrada
 
 La aplicación incluye ayuda contextual:
@@ -461,7 +452,7 @@ Esta herramienta está diseñada para uso legítimo en redes de tu propiedad o c
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 ![Maintenance](https://img.shields.io/badge/maintained-yes-green.svg)
 
-**Última actualización**: Octubre 2025
+**Última actualización**: Noviembre 2025
 
 ### Versión Actual: 2.0
 
