@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 from typing import Optional
 import csv
+import webbrowser
 
 import customtkinter as ctk
 
@@ -36,6 +37,7 @@ from networking.messaging import (
     verificar_disponibilidad_mensajeria,
     detectar_sistema_operativo_por_puertos,
 )
+from networking.public_ip import obtener_ip_publica_async
 from config import get_config
 
 
@@ -64,6 +66,8 @@ class Aplicacion:
         })
         self._splash_image: Optional[ctk.CTkImage] = None
         self._hosts_cache: list[dict] = []  # Cache de hosts para filtrado y exportación
+        self.ip_publica: Optional[str] = None  # IP pública del usuario
+        self.label_ip_publica: Optional[ctk.CTkLabel] = None  # Label para mostrar IP pública
         
         # Icono de bandeja del sistema
         self.tray_icon = None
@@ -74,9 +78,23 @@ class Aplicacion:
         self._configurar_estilos_tabla()
         self._cargar_imagen_splash()
         self._iniciar_icono_bandeja()
+        self._obtener_ip_publica_inicial()  # Obtener IP pública al iniciar
         
         # Configurar evento de cerrar ventana
         self.raiz.protocol("WM_DELETE_WINDOW", self._minimizar_a_bandeja)
+
+    def _configurar_ventana_modal(self, ventana: ctk.CTkToplevel) -> None:
+        """Configura una ventana como modal de forma segura."""
+        ventana.transient(self.raiz)
+        # Actualizar para que la ventana sea visible antes de grab_set
+        ventana.update_idletasks()
+        ventana.deiconify()
+        # Hacer grab_set de forma segura
+        try:
+            ventana.grab_set()
+        except tk.TclError:
+            # Si falla, continuar sin modal
+            pass
 
     def _construir_interfaz(self) -> None:
         """Crea todos los widgets principales con CustomTkinter."""
@@ -87,6 +105,7 @@ class Aplicacion:
         marco_superior.pack(fill="x", **padding)
         marco_superior.grid_columnconfigure(1, weight=1)
 
+        # Primera fila: Red detectada + IP Pública (derecha)
         ctk.CTkLabel(marco_superior, text="Red detectada:").grid(row=0, column=0, sticky="w")
         self.selector_interfaz = ctk.CTkComboBox(marco_superior, values=[])
         self.selector_interfaz.grid(row=0, column=1, sticky="ew", padx=8)
@@ -95,7 +114,43 @@ class Aplicacion:
             text="Escanear red seleccionada",
             command=self.iniciar_escaneo_interfaz,
         ).grid(row=0, column=2, padx=8)
+        
+        # Frame para IP pública alineada a la derecha en la primera fila
+        marco_ip_publica = ctk.CTkFrame(marco_superior, fg_color="transparent")
+        marco_ip_publica.grid(row=0, column=3, columnspan=3, sticky="e", padx=(16, 0))
+        
+        # Label para IP pública
+        self.label_ip_publica = ctk.CTkLabel(
+            marco_ip_publica,
+            text="🌍 IP Pública: Obteniendo...",
+            font=("Segoe UI", 10),
+            anchor="e"
+        )
+        self.label_ip_publica.pack(side="left", padx=(0, 8))
+        
+        # Botón para copiar IP pública
+        self.boton_copiar_ip = ctk.CTkButton(
+            marco_ip_publica,
+            text="📋",
+            width=32,
+            height=24,
+            font=("Segoe UI", 10),
+            command=self._copiar_ip_publica,
+            state="disabled"
+        )
+        self.boton_copiar_ip.pack(side="left", padx=(0, 4))
+        
+        # Botón para actualizar IP pública
+        ctk.CTkButton(
+            marco_ip_publica,
+            text="🔄",
+            width=32,
+            height=24,
+            font=("Segoe UI", 10),
+            command=self._actualizar_ip_publica
+        ).pack(side="left")
 
+        # Segunda fila: Red personalizada
         ctk.CTkLabel(marco_superior, text="Red personalizada (CIDR):").grid(
             row=1, column=0, sticky="w", pady=(16, 0)
         )
@@ -277,51 +332,72 @@ class Aplicacion:
         self.raiz.after(100, self._procesar_resultados)
 
     def _procesar_resultados(self) -> None:
-        """Consume la cola del hilo para actualizar la tabla."""
-
+        """Consume la cola del hilo para actualizar la tabla (optimizado con procesamiento por lotes)."""
+        resultados_pendientes = []
+        actualizar_progreso = False
+        
         try:
+            # Procesar múltiples elementos de la cola a la vez (mejora rendimiento)
             while True:
                 item = self.cola_resultados.get_nowait()
                 if item is None:
                     self._finalizar_escaneo()
                     return
-                if isinstance(item, tuple) and len(item) >= 5:
-                    direccion_ip = item[0]
-                    sistema = item[1]
-                    activo = item[2]
-                    procesados = item[3]
-                    puertos = item[4]
-                    ttl = item[5] if len(item) >= 6 else None
-                    self.hosts_procesados = procesados
-                else:
-                    direccion_ip, sistema, activo = item  # type: ignore[misc]
-                    puertos = []
-                    ttl = None
-                    self.hosts_procesados += 1
-                self._actualizar_estado_progreso()
-                if not activo:
-                    # Solo mostramos los hosts que responden para mantener la vista limpia.
-                    continue
-                texto_puertos = ", ".join(str(p) for p in puertos) if puertos else "—"
-                sistema_mostrar = sistema or "Sistema desconocido"
                 
-                # Añadir a cache para filtrado y exportación
-                self._hosts_cache.append({
-                    "ip": direccion_ip,
-                    "os": sistema_mostrar,
-                    "puertos": puertos,
-                    "estado": "Activo"
-                })
+                resultados_pendientes.append(item)
                 
-                self.tabla.insert(
-                    "",
-                    "end",
-                    values=(direccion_ip, sistema_mostrar, texto_puertos, "Activo"),
-                )
+                # Procesar en lotes de 5 para reducir actualizaciones de UI
+                if len(resultados_pendientes) >= 5:
+                    break
         except queue.Empty:
             pass
 
-        self.raiz.after(150, self._procesar_resultados)
+        # Procesar resultados acumulados
+        for item in resultados_pendientes:
+            if isinstance(item, tuple) and len(item) >= 5:
+                direccion_ip = item[0]
+                sistema = item[1]
+                activo = item[2]
+                procesados = item[3]
+                puertos = item[4]
+                ttl = item[5] if len(item) >= 6 else None
+                self.hosts_procesados = procesados
+            else:
+                direccion_ip, sistema, activo = item  # type: ignore[misc]
+                puertos = []
+                ttl = None
+                self.hosts_procesados += 1
+            
+            actualizar_progreso = True
+            
+            if not activo:
+                # Solo mostramos los hosts que responden para mantener la vista limpia.
+                continue
+            
+            texto_puertos = ", ".join(str(p) for p in puertos) if puertos else "—"
+            sistema_mostrar = sistema or "Sistema desconocido"
+            
+            # Añadir a cache para filtrado y exportación
+            self._hosts_cache.append({
+                "ip": direccion_ip,
+                "os": sistema_mostrar,
+                "puertos": puertos,
+                "estado": "Activo"
+            })
+            
+            self.tabla.insert(
+                "",
+                "end",
+                values=(direccion_ip, sistema_mostrar, texto_puertos, "Activo"),
+            )
+        
+        # Actualizar progreso solo una vez por lote
+        if actualizar_progreso:
+            self._actualizar_estado_progreso()
+
+        # Ajustar intervalo según carga (más rápido cuando hay actividad)
+        intervalo = 50 if resultados_pendientes else 150
+        self.raiz.after(intervalo, self._procesar_resultados)
 
     def _finalizar_escaneo(self) -> None:
         """Actualiza el estado cuando no quedan hosts pendientes."""
@@ -405,6 +481,52 @@ class Aplicacion:
                     command=lambda: self._conectar_ssh(ip),
                 )
             
+            # Opción análisis DNS si puerto 53 está disponible
+            if 53 in puertos:
+                self.menu_contextual.add_separator()
+                self.menu_contextual.add_command(
+                    label="🌐 Analizar servidor DNS…",
+                    command=lambda: self._analizar_dns(ip),
+                )
+            
+            # Opciones para abrir en navegador si hay puertos web abiertos
+            puertos_web = []
+            if 80 in puertos:
+                puertos_web.append(("http", 80))
+            if 443 in puertos:
+                puertos_web.append(("https", 443))
+            if 8080 in puertos:
+                puertos_web.append(("http", 8080))
+            if 8443 in puertos:
+                puertos_web.append(("https", 8443))
+            
+            # Otros puertos comunes de web
+            for puerto in puertos:
+                if puerto in [3000, 5000, 8000, 8888, 9090] and ("http", puerto) not in puertos_web:
+                    puertos_web.append(("http", puerto))
+            
+            if puertos_web:
+                self.menu_contextual.add_separator()
+                self.menu_contextual.add_command(
+                    label="🌐 Abrir en navegador",
+                    command=lambda: None,
+                    state="disabled",
+                    foreground="gray"
+                )
+                
+                for protocolo, puerto in puertos_web:
+                    if puerto in [80, 443]:
+                        # Puertos estándar, no mostrar el puerto en la etiqueta
+                        label = f"   • {protocolo.upper()} ({ip})"
+                    else:
+                        # Puertos no estándar, mostrar el puerto
+                        label = f"   • {protocolo.upper()} ({ip}:{puerto})"
+                    
+                    self.menu_contextual.add_command(
+                        label=label,
+                        command=lambda p=protocolo, pt=puerto, i=ip: self._abrir_en_navegador(i, p, pt),
+                    )
+            
             try:
                 self.menu_contextual.tk_popup(evento.x_root, evento.y_root)
             finally:
@@ -487,8 +609,9 @@ class Aplicacion:
         ventana.title(f"Enviar mensaje a {direccion_ip}")
         ventana.geometry("500x480")
         ventana.resizable(False, False)
-        ventana.transient(self.raiz)
-        ventana.grab_set()
+        
+        # Configurar como modal de forma segura
+        self._configurar_ventana_modal(ventana)
 
         # Centrar ventana
         ventana.update_idletasks()
@@ -511,7 +634,11 @@ class Aplicacion:
         metodo_nombre = {
             "msg": "Comando MSG (Windows)",
             "powershell": "PowerShell Remoting",
-            "net_send": "Net Send (obsoleto)"
+            "net_send": "Net Send (obsoleto)",
+            "ssh_linux": "SSH para Linux/Unix",
+            "samba_linux": "Samba/NetBIOS (Linux)",
+            "netcat": "Netcat (Socket TCP)",
+            "write_unix": "Write Unix (obsoleto)"
         }.get(metodo, metodo)
 
         # Encabezado
@@ -684,7 +811,7 @@ class Aplicacion:
         dispositivos_info = []
         for ip in direcciones_ip:
             tiene_puertos, puertos = verificar_disponibilidad_mensajeria(ip)
-            so_detectado = detectar_sistema_operativo_por_puertos(ip)
+            so_detectado = detectar_sistema_operativo_por_puertos(puertos)  # Pasar lista de puertos, no IP
             dispositivos_info.append({
                 "ip": ip,
                 "tiene_puertos": tiene_puertos,
@@ -717,8 +844,9 @@ class Aplicacion:
         ventana.title(f"Enviar mensaje a {len(direcciones_ip)} dispositivos")
         ventana.geometry("700x550")
         ventana.resizable(False, False)
-        ventana.transient(self.raiz)
-        ventana.grab_set()
+        
+        # Configurar como modal de forma segura
+        self._configurar_ventana_modal(ventana)
 
         # Centrar ventana
         ventana.update_idletasks()
@@ -741,7 +869,10 @@ class Aplicacion:
             "msg": "Comando MSG (Windows)",
             "powershell": "PowerShell Remoting",
             "net_send": "Net Send (obsoleto)",
-            "ssh_linux": "SSH para Linux/Unix"
+            "ssh_linux": "SSH para Linux/Unix",
+            "samba_linux": "Samba/NetBIOS (Linux)",
+            "netcat": "Netcat (Socket TCP)",
+            "write_unix": "Write Unix (obsoleto)"
         }.get(metodo, metodo)
 
         # Encabezado
@@ -939,8 +1070,10 @@ class Aplicacion:
         ventana = ctk.CTkToplevel(self.raiz)
         ventana.title(f"Escaneo profundo — {direccion_ip}")
         ventana.geometry("900x600")
-        ventana.transient(self.raiz)
-        ventana.grab_set()
+        
+        # Configurar como modal de forma segura
+        self._configurar_ventana_modal(ventana)
+        
         ventana.protocol("WM_DELETE_WINDOW", lambda: self._cerrar_ventana_profunda(ventana))
 
         etiqueta = ctk.CTkLabel(ventana, text=f"Analizando {direccion_ip}…")
@@ -977,9 +1110,36 @@ class Aplicacion:
         for widget in ventana.winfo_children():
             widget.destroy()
 
+        # Crear TabView para organizar la información
+        tabview = ctk.CTkTabview(ventana)
+        tabview.pack(fill="both", expand=True, padx=20, pady=(20, 12))
+        
+        # Pestaña 1: Información General
+        tab_info = tabview.add("📊 Información General")
+        self._crear_tab_informacion_general(tab_info, resultado)
+        
+        # Pestaña 2: Análisis de Seguridad
+        tab_seguridad = tabview.add("🔒 Seguridad")
+        self._crear_tab_seguridad(tab_seguridad, resultado)
+        
+        # Pestaña 3: Opciones Nmap
+        tab_nmap = tabview.add("🔍 Nmap Avanzado")
+        self._crear_tab_nmap(tab_nmap, resultado.ip)
+        
+        # Seleccionar primera pestaña por defecto
+        tabview.set("📊 Información General")
+
+        ctk.CTkButton(
+            ventana,
+            text="Cerrar",
+            command=lambda: self._cerrar_ventana_profunda(ventana),
+        ).pack(pady=(0, 16))
+    
+    def _crear_tab_informacion_general(self, tab: ctk.CTkFrame, resultado: DeepScanResult) -> None:
+        """Crea el contenido de la pestaña de información general"""
         # Contenedor principal con scroll
-        contenedor_principal = ctk.CTkScrollableFrame(ventana)
-        contenedor_principal.pack(fill="both", expand=True, padx=20, pady=(20, 12))
+        contenedor_principal = ctk.CTkScrollableFrame(tab)
+        contenedor_principal.pack(fill="both", expand=True, padx=10, pady=10)
 
         # Información básica
         ctk.CTkLabel(
@@ -1047,25 +1207,6 @@ class Aplicacion:
                     wraplength=650,
                 ).pack(anchor="w", pady=(2, 0))
 
-        # Recomendaciones
-        if resultado.recomendaciones:
-            ctk.CTkLabel(
-                contenedor_principal,
-                text="💡 Recomendaciones",
-                font=("Segoe UI", 16, "bold"),
-            ).pack(anchor="w", pady=(16, 12))
-
-            rec_frame = ctk.CTkFrame(contenedor_principal)
-            rec_frame.pack(fill="x", pady=(0, 16))
-
-            for rec in resultado.recomendaciones:
-                ctk.CTkLabel(
-                    rec_frame,
-                    text=f"• {rec}",
-                    font=("Segoe UI", 11),
-                    anchor="w",
-                ).pack(anchor="w", padx=12, pady=4)
-
         # Recursos compartidos
         recursos_filtrados = self._filtrar_recursos_compartidos(resultado.recursos_compartidos)
         if recursos_filtrados:
@@ -1090,12 +1231,421 @@ class Aplicacion:
                 boton.grid(row=fila, column=columna, padx=4, pady=4, sticky="ew")
             for columna in range(columnas):
                 contenedor_botones.grid_columnconfigure(columna, weight=1)
+    
+    def _crear_tab_seguridad(self, tab: ctk.CTkFrame, resultado: DeepScanResult) -> None:
+        """Crea el contenido de la pestaña de seguridad"""
+        contenedor_principal = ctk.CTkScrollableFrame(tab)
+        contenedor_principal.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        #Recomendaciones
+        if resultado.recomendaciones:
+            ctk.CTkLabel(
+                contenedor_principal,
+                text="💡 Recomendaciones de Seguridad",
+                font=("Segoe UI", 16, "bold"),
+            ).pack(anchor="w", pady=(0, 12))
 
-        ctk.CTkButton(
-            ventana,
-            text="Cerrar",
-            command=lambda: self._cerrar_ventana_profunda(ventana),
-        ).pack(pady=(0, 16))
+            rec_frame = ctk.CTkFrame(contenedor_principal)
+            rec_frame.pack(fill="x", pady=(0, 16))
+
+            for rec in resultado.recomendaciones:
+                ctk.CTkLabel(
+                    rec_frame,
+                    text=f"• {rec}",
+                    font=("Segoe UI", 11),
+                    anchor="w",
+                ).pack(anchor="w", padx=12, pady=4)
+        else:
+            ctk.CTkLabel(
+                contenedor_principal,
+                text="✅ No se encontraron problemas de seguridad",
+                font=("Segoe UI", 14),
+                text_color=("#2e7d32", "#66bb6a"),
+            ).pack(anchor="w", pady=20)
+    
+    def _crear_tab_nmap(self, tab: ctk.CTkFrame, ip: str) -> None:
+        """Crea el contenido de la pestaña de Nmap avanzado"""
+        from networking.nmap_integration import nmap_disponible, obtener_info_nmap, scan_host_nmap, requiere_privilegios
+        
+        contenedor_principal = ctk.CTkScrollableFrame(tab)
+        contenedor_principal.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Verificar disponibilidad de Nmap
+        disponible, mensaje = obtener_info_nmap()
+        
+        # Título
+        ctk.CTkLabel(
+            contenedor_principal,
+            text="🔍 Escaneo Avanzado con Nmap",
+            font=("Segoe UI", 16, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+        
+        # Estado de Nmap
+        color_estado = ("#2e7d32", "#66bb6a") if disponible else ("#d32f2f", "#ef5350")
+        ctk.CTkLabel(
+            contenedor_principal,
+            text=mensaje,
+            font=("Segoe UI", 11),
+            text_color=color_estado,
+        ).pack(anchor="w", pady=(0, 16))
+        
+        if not disponible:
+            ctk.CTkLabel(
+                contenedor_principal,
+                text="Para usar las funciones avanzadas de Nmap:",
+                font=("Segoe UI", 11, "bold"),
+            ).pack(anchor="w", pady=(8, 4))
+            
+            ctk.CTkLabel(
+                contenedor_principal,
+                text="1. Instale Nmap: https://nmap.org/download.html",
+                font=("Segoe UI", 10),
+            ).pack(anchor="w", padx=20, pady=2)
+            
+            ctk.CTkLabel(
+                contenedor_principal,
+                text="2. Instale python-nmap: pip install python-nmap",
+                font=("Segoe UI", 10),
+            ).pack(anchor="w", padx=20, pady=2)
+            return
+        
+        # Opciones de escaneo
+        ctk.CTkLabel(
+            contenedor_principal,
+            text="Opciones de Escaneo",
+            font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w", pady=(16, 8))
+        
+        # Frame para opciones
+        opciones_frame = ctk.CTkFrame(contenedor_principal)
+        opciones_frame.pack(fill="x", pady=(0, 16))
+        
+        # Variables para almacenar selecciones
+        scan_options = {}
+        
+        # Opción 1: Detección de servicios y versiones
+        scan_options["deteccion_servicios"] = ctk.CTkCheckBox(
+            opciones_frame,
+            text="Detección de servicios y versiones (-sV)",
+        )
+        scan_options["deteccion_servicios"].pack(anchor="w", padx=12, pady=4)
+        scan_options["deteccion_servicios"].select()  # Seleccionado por defecto
+        
+        # Opción 2: Detección de Sistema Operativo
+        scan_options["deteccion_os"] = ctk.CTkCheckBox(
+            opciones_frame,
+            text="Detección de Sistema Operativo (-O)",
+        )
+        scan_options["deteccion_os"].pack(anchor="w", padx=12, pady=4)
+        
+        # Opción 3: Scripts de NSE
+        scan_options["scripts_nse"] = ctk.CTkCheckBox(
+            opciones_frame,
+            text="Scripts de vulnerabilidades (--script=vuln)",
+        )
+        scan_options["scripts_nse"].pack(anchor="w", padx=12, pady=4)
+        
+        # Opción 4: Escaneo agresivo
+        scan_options["agresivo"] = ctk.CTkCheckBox(
+            opciones_frame,
+            text="Escaneo agresivo (-A: OS, versión, scripts, traceroute)",
+        )
+        scan_options["agresivo"].pack(anchor="w", padx=12, pady=4)
+        
+        # Opción 5: Velocidad de escaneo
+        ctk.CTkLabel(
+            opciones_frame,
+            text="Velocidad de escaneo:",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+        
+        scan_options["velocidad"] = ctk.CTkSegmentedButton(
+            opciones_frame,
+            values=["Lento (-T2)", "Normal (-T3)", "Rápido (-T4)", "Muy rápido (-T5)"],
+        )
+        scan_options["velocidad"].pack(anchor="w", padx=12, pady=4, fill="x")
+        scan_options["velocidad"].set("Rápido (-T4)")  # Valor por defecto
+        
+        # Opción 6: Puertos a escanear
+        ctk.CTkLabel(
+            opciones_frame,
+            text="Puertos a escanear:",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+        
+        scan_options["puertos"] = ctk.CTkSegmentedButton(
+            opciones_frame,
+            values=["Top 100", "Top 1000", "Todos", "Personalizado"],
+        )
+        scan_options["puertos"].pack(anchor="w", padx=12, pady=4, fill="x")
+        scan_options["puertos"].set("Top 1000")  # Valor por defecto
+        
+        # Entry para puertos personalizados
+        scan_options["puertos_custom"] = ctk.CTkEntry(
+            opciones_frame,
+            placeholder_text="Ej: 22,80,443,8080 o 1-1000",
+        )
+        scan_options["puertos_custom"].pack(anchor="w", padx=12, pady=4, fill="x")
+        
+        # Área de resultados
+        ctk.CTkLabel(
+            contenedor_principal,
+            text="Resultados del Escaneo",
+            font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w", pady=(16, 8))
+        
+        resultado_text = ctk.CTkTextbox(
+            contenedor_principal,
+            height=300,
+            font=("Consolas", 10),
+        )
+        resultado_text.pack(fill="both", expand=True, pady=(0, 12))
+        resultado_text.insert("1.0", f"Host objetivo: {ip}\n\nHaga clic en 'Iniciar Escaneo' para comenzar...\n")
+        resultado_text.configure(state="disabled")
+        
+        # Barra de progreso
+        progreso = ctk.CTkProgressBar(contenedor_principal, mode="indeterminate")
+        progreso.pack(fill="x", pady=8)
+        progreso.pack_forget()  # Ocultar inicialmente
+        
+        # Botón para iniciar escaneo
+        def iniciar_escaneo_nmap():
+            # Construir argumentos de nmap
+            args = []
+            
+            # Agregar opciones seleccionadas
+            if scan_options["agresivo"].get():
+                args.append("-A")
+            else:
+                if scan_options["deteccion_servicios"].get():
+                    args.append("-sV")
+                if scan_options["deteccion_os"].get():
+                    args.append("-O")
+                if scan_options["scripts_nse"].get():
+                    args.append("--script=vuln")
+            
+            # Velocidad
+            velocidad_map = {
+                "Lento (-T2)": "-T2",
+                "Normal (-T3)": "-T3",
+                "Rápido (-T4)": "-T4",
+                "Muy rápido (-T5)": "-T5",
+            }
+            args.append(velocidad_map[scan_options["velocidad"].get()])
+            
+            # Puertos
+            puertos_sel = scan_options["puertos"].get()
+            if puertos_sel == "Top 100":
+                args.append("--top-ports 100")
+            elif puertos_sel == "Top 1000":
+                args.append("--top-ports 1000")
+            elif puertos_sel == "Personalizado":
+                puertos_custom = scan_options["puertos_custom"].get().strip()
+                if puertos_custom:
+                    args.append(f"-p {puertos_custom}")
+            # "Todos" no requiere argumento especial
+            
+            argumentos_nmap = " ".join(args)
+            
+            # Verificar si requiere privilegios
+            import platform
+            necesita_privilegios = requiere_privilegios(argumentos_nmap)
+            sudo_password = None
+            
+            if necesita_privilegios:
+                sistema = platform.system()
+                
+                if sistema == "Windows":
+                    # En Windows, verificar si es admin
+                    import ctypes
+                    try:
+                        es_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+                        if not es_admin:
+                            messagebox.showwarning(
+                                "Privilegios requeridos",
+                                "Esta operación requiere privilegios de administrador.\n\n"
+                                "Por favor, cierre la aplicación y ejecútela como administrador."
+                            )
+                            return
+                    except:
+                        messagebox.showwarning(
+                            "Advertencia",
+                            "No se pudo verificar los privilegios de administrador.\n"
+                            "Si el escaneo falla, ejecute la aplicación como administrador."
+                        )
+                else:
+                    # En Linux/Mac, solicitar contraseña si no es root
+                    import subprocess
+                    if subprocess.run(['id', '-u'], capture_output=True, text=True).stdout.strip() != '0':
+                        # Crear diálogo para solicitar contraseña
+                        dialog = ctk.CTkToplevel(self.raiz)
+                        dialog.title("Privilegios de Administrador")
+                        dialog.geometry("400x220")
+                        dialog.transient(self.raiz)
+                        
+                        # Centrar el diálogo
+                        dialog.update_idletasks()
+                        x = (dialog.winfo_screenwidth() // 2) - (400 // 2)
+                        y = (dialog.winfo_screenheight() // 2) - (220 // 2)
+                        dialog.geometry(f"400x220+{x}+{y}")
+                        
+                        ctk.CTkLabel(
+                            dialog,
+                            text="⚠️ Privilegios de Administrador Requeridos",
+                            font=("Segoe UI", 14, "bold"),
+                        ).pack(pady=(20, 10))
+                        
+                        ctk.CTkLabel(
+                            dialog,
+                            text="Esta operación requiere privilegios elevados.\n"
+                                 "Por favor, introduzca su contraseña de sudo:",
+                            font=("Segoe UI", 11),
+                        ).pack(pady=(0, 15))
+                        
+                        password_var = ctk.StringVar()
+                        password_entry = ctk.CTkEntry(
+                            dialog,
+                            textvariable=password_var,
+                            show="●",
+                            placeholder_text="Contraseña",
+                            width=300,
+                            height=35,
+                        )
+                        password_entry.pack(pady=10)
+                        
+                        resultado_dialog = {"aceptado": False}
+                        
+                        def aceptar():
+                            resultado_dialog["aceptado"] = True
+                            dialog.destroy()
+                        
+                        def cancelar():
+                            resultado_dialog["aceptado"] = False
+                            dialog.destroy()
+                        
+                        # Bind Enter key
+                        password_entry.bind("<Return>", lambda e: aceptar())
+                        
+                        # Botones
+                        botones_frame = ctk.CTkFrame(dialog)
+                        botones_frame.pack(pady=15)
+                        
+                        ctk.CTkButton(
+                            botones_frame,
+                            text="Cancelar",
+                            command=cancelar,
+                            width=120,
+                            fg_color="gray",
+                        ).pack(side="left", padx=5)
+                        
+                        ctk.CTkButton(
+                            botones_frame,
+                            text="Aceptar",
+                            command=aceptar,
+                            width=120,
+                        ).pack(side="left", padx=5)
+                        
+                        # Asegurarse de que la ventana esté completamente visible antes de grab_set
+                        dialog.update()
+                        dialog.deiconify()
+                        
+                        # Ahora sí capturar el foco
+                        try:
+                            dialog.grab_set()
+                            password_entry.focus()
+                        except:
+                            # Si falla grab_set, no es crítico, el diálogo sigue funcionando
+                            password_entry.focus()
+                        
+                        dialog.wait_window()
+                        
+                        if not resultado_dialog["aceptado"]:
+                            return
+                        
+                        sudo_password = password_var.get()
+                        if not sudo_password:
+                            messagebox.showwarning("Error", "Debe introducir una contraseña")
+                            return
+            
+            # Mostrar progreso
+            resultado_text.configure(state="normal")
+            resultado_text.delete("1.0", "end")
+            resultado_text.insert("1.0", f"Escaneando {ip} con opciones: {argumentos_nmap}\n\n")
+            resultado_text.insert("end", "Esto puede tardar varios minutos dependiendo de las opciones seleccionadas...\n")
+            resultado_text.configure(state="disabled")
+            progreso.pack(fill="x", pady=8)
+            progreso.start()
+            boton_escanear.configure(state="disabled")
+            
+            def ejecutar_escaneo():
+                try:
+                    result = scan_host_nmap(ip, argumentos_nmap, sudo_password)
+                    self.raiz.after(0, lambda: mostrar_resultado_nmap(result, None))
+                except Exception as e:
+                    error_msg = str(e)
+                    self.raiz.after(0, lambda: mostrar_resultado_nmap(None, error_msg))
+            
+            def mostrar_resultado_nmap(result, error):
+                progreso.stop()
+                progreso.pack_forget()
+                boton_escanear.configure(state="normal")
+                
+                resultado_text.configure(state="normal")
+                resultado_text.delete("1.0", "end")
+                
+                if error:
+                    resultado_text.insert("1.0", f"❌ Error al escanear:\n{error}\n")
+                else:
+                    # Formatear resultado
+                    resultado_text.insert("1.0", f"✅ Escaneo completado para {ip}\n")
+                    resultado_text.insert("end", "=" * 60 + "\n\n")
+                    
+                    resultado_text.insert("end", f"Estado: {result.get('state', 'desconocido')}\n")
+                    resultado_text.insert("end", f"Hostname: {result.get('hostname', 'N/A')}\n")
+                    resultado_text.insert("end", f"Protocolos: {', '.join(result.get('protocols', []))}\n\n")
+                    
+                    # Puertos
+                    if result.get('ports'):
+                        resultado_text.insert("end", "PUERTOS ABIERTOS:\n")
+                        resultado_text.insert("end", "-" * 60 + "\n")
+                        for port_info in result['ports']:
+                            puerto = port_info['port']
+                            estado = port_info['state']
+                            servicio = port_info['service']
+                            producto = port_info['product']
+                            version = port_info['version']
+                            
+                            linea = f"{puerto}/tcp\t{estado}\t{servicio}"
+                            if producto:
+                                linea += f" ({producto}"
+                                if version:
+                                    linea += f" {version}"
+                                linea += ")"
+                            resultado_text.insert("end", linea + "\n")
+                        resultado_text.insert("end", "\n")
+                    
+                    # Sistema Operativo
+                    if result.get('os'):
+                        resultado_text.insert("end", "SISTEMA OPERATIVO:\n")
+                        resultado_text.insert("end", "-" * 60 + "\n")
+                        for os_info in result['os']:
+                            resultado_text.insert("end", f"{os_info['name']} (certeza: {os_info['accuracy']}%)\n")
+                        resultado_text.insert("end", "\n")
+                
+                resultado_text.configure(state="disabled")
+            
+            # Ejecutar en hilo separado
+            thread = threading.Thread(target=ejecutar_escaneo, daemon=True)
+            thread.start()
+        
+        boton_escanear = ctk.CTkButton(
+            contenedor_principal,
+            text="🚀 Iniciar Escaneo",
+            command=iniciar_escaneo_nmap,
+            font=("Segoe UI", 12, "bold"),
+            height=40,
+        )
+        boton_escanear.pack(fill="x", pady=8)
 
     def _formatear_resultado_profundo(self, resultado: DeepScanResult) -> list[tuple[str, str]]:
         filas: list[tuple[str, str]] = []
@@ -1142,13 +1692,340 @@ class Aplicacion:
             self.ventana_profunda = None
 
     def _abrir_recurso_compartido(self, ip: str, recurso: str) -> None:
-        ruta = f"\\\\{ip}\\{recurso}"
+        """
+        Abre un recurso compartido SMB en el explorador de archivos.
+        Compatible con Windows, Linux y macOS.
+        """
+        import platform
+        import shutil
+        
+        ruta_windows = f"\\\\{ip}\\{recurso}"
+        ruta_smb = f"smb://{ip}/{recurso}"
+        sistema = platform.system()
+        exito = False
+        
         try:
-            os.startfile(ruta)
-        except OSError as exc:
+            if sistema == "Windows":
+                # Windows: intentar varios métodos
+                try:
+                    # Método 1: os.startfile (más confiable en Windows)
+                    if hasattr(os, 'startfile'):
+                        os.startfile(ruta_windows)  # type: ignore
+                        exito = True
+                    else:
+                        # Método 2: explorer.exe
+                        resultado = subprocess.run(
+                            ["explorer", ruta_windows],
+                            capture_output=True,
+                            timeout=2
+                        )
+                        exito = resultado.returncode == 0
+                        
+                except Exception as e:
+                    # Si falla, mostrar diálogo con opciones
+                    self._mostrar_dialogo_recurso_compartido(ip, recurso, ruta_windows, str(e), es_windows=True)
+                    return
+                    
+            elif sistema == "Darwin":  # macOS
+                # macOS: usar open con smb://
+                try:
+                    subprocess.Popen(["open", ruta_smb])
+                    exito = True
+                except Exception as e:
+                    self._mostrar_dialogo_recurso_compartido(ip, recurso, ruta_smb, str(e), es_windows=False)
+                    return
+                
+            else:  # Linux
+                # En Linux, probar varios métodos en orden de preferencia
+                
+                # Método 1: Nautilus con smb:// (GNOME)
+                if shutil.which("nautilus"):
+                    try:
+                        subprocess.Popen(["nautilus", ruta_smb], 
+                                       stderr=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL)
+                        exito = True
+                        return
+                    except Exception:
+                        pass
+                
+                # Método 2: Dolphin (KDE)
+                if shutil.which("dolphin"):
+                    try:
+                        subprocess.Popen(["dolphin", ruta_smb],
+                                       stderr=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL)
+                        exito = True
+                        return
+                    except Exception:
+                        pass
+                
+                # Método 3: Thunar (XFCE)
+                if shutil.which("thunar"):
+                    try:
+                        subprocess.Popen(["thunar", ruta_smb],
+                                       stderr=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL)
+                        exito = True
+                        return
+                    except Exception:
+                        pass
+                
+                # Método 4: PCManFM (LXDE)
+                if shutil.which("pcmanfm"):
+                    try:
+                        subprocess.Popen(["pcmanfm", ruta_smb],
+                                       stderr=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL)
+                        exito = True
+                        return
+                    except Exception:
+                        pass
+                
+                # Método 5: Caja (MATE)
+                if shutil.which("caja"):
+                    try:
+                        subprocess.Popen(["caja", ruta_smb],
+                                       stderr=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL)
+                        exito = True
+                        return
+                    except Exception:
+                        pass
+                
+                # Método 6: Nemo (Cinnamon)
+                if shutil.which("nemo"):
+                    try:
+                        subprocess.Popen(["nemo", ruta_smb],
+                                       stderr=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL)
+                        exito = True
+                        return
+                    except Exception:
+                        pass
+                
+                # Si ningún explorador gráfico funciona, mostrar diálogo con opciones
+                if not exito:
+                    self._mostrar_dialogo_recurso_compartido(ip, recurso, ruta_smb, 
+                                                            "No se encontró explorador de archivos compatible", 
+                                                            es_windows=False)
+                
+        except Exception as exc:
+            # Si hay error, mostrar diálogo con opciones
+            ruta_mostrar = ruta_windows if sistema == "Windows" else ruta_smb
+            self._mostrar_dialogo_recurso_compartido(ip, recurso, ruta_mostrar, str(exc), 
+                                                    es_windows=(sistema == "Windows"))
+    
+    def _mostrar_dialogo_recurso_compartido(self, ip: str, recurso: str, 
+                                           ruta: str, error: Optional[str] = None,
+                                           es_windows: bool = False) -> None:
+        """
+        Muestra un diálogo con opciones para acceder al recurso compartido.
+        Instrucciones específicas para Windows y Linux.
+        """
+        import platform
+        
+        # Si no se especificó, detectar sistema
+        if not es_windows and platform.system() == "Windows":
+            es_windows = True
+        
+        ventana = ctk.CTkToplevel(self.raiz)
+        ventana.title("Recurso Compartido SMB")
+        ventana.geometry("600x500")
+        ventana.resizable(False, False)
+        
+        # Configurar como modal
+        self._configurar_ventana_modal(ventana)
+        
+        # Centrar ventana
+        ventana.update_idletasks()
+        pantalla_ancho = ventana.winfo_screenwidth()
+        pantalla_alto = ventana.winfo_screenheight()
+        ancho = 600
+        alto = 500
+        posicion_x = int((pantalla_ancho - ancho) / 2)
+        posicion_y = int((pantalla_alto - alto) / 2)
+        ventana.geometry(f"{ancho}x{alto}+{posicion_x}+{posicion_y}")
+        
+        contenedor = ctk.CTkFrame(ventana)
+        contenedor.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Encabezado
+        sistema_texto = "Windows" if es_windows else "Linux/macOS"
+        ctk.CTkLabel(
+            contenedor,
+            text=f"📁 Acceder a Recurso Compartido ({sistema_texto})",
+            font=("Segoe UI", 16, "bold"),
+        ).pack(pady=(0, 12))
+        
+        # Información del recurso
+        info_frame = ctk.CTkFrame(contenedor)
+        info_frame.pack(fill="x", pady=(0, 12))
+        
+        ctk.CTkLabel(
+            info_frame,
+            text=f"IP: {ip}",
+            font=("Segoe UI", 11),
+            anchor="w"
+        ).pack(padx=12, pady=4, anchor="w")
+        
+        ctk.CTkLabel(
+            info_frame,
+            text=f"Recurso: {recurso}",
+            font=("Segoe UI", 11),
+            anchor="w"
+        ).pack(padx=12, pady=4, anchor="w")
+        
+        # Ruta
+        titulo_ruta = "Ruta UNC:" if es_windows else "Ruta SMB:"
+        ctk.CTkLabel(
+            contenedor,
+            text=titulo_ruta,
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w", pady=(8, 4))
+        
+        entrada_ruta = ctk.CTkEntry(
+            contenedor,
+            font=("Consolas", 10),
+        )
+        entrada_ruta.pack(fill="x", pady=(0, 4))
+        entrada_ruta.insert(0, ruta)
+        entrada_ruta.configure(state="readonly")
+        
+        # Botón copiar ruta
+        ctk.CTkButton(
+            contenedor,
+            text="📋 Copiar ruta",
+            command=lambda: self._copiar_texto(ruta, ventana),
+            width=150
+        ).pack(pady=(0, 12))
+        
+        # Instrucciones específicas por sistema
+        ctk.CTkLabel(
+            contenedor,
+            text="📝 Instrucciones:",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w", pady=(8, 4))
+        
+        instrucciones_frame = ctk.CTkScrollableFrame(contenedor, height=200)
+        instrucciones_frame.pack(fill="both", expand=True, pady=(0, 12))
+        
+        if es_windows:
+            instrucciones = f"""
+MÉTODO 1: Explorador de Archivos (Recomendado)
+  1. Abrir Explorador de Windows (Win + E)
+  2. En la barra de direcciones, pegar: {ruta}
+  3. Presionar Enter
+  4. Si pide credenciales, ingresar usuario y contraseña
+
+MÉTODO 2: Ejecutar (Win + R)
+  1. Presionar Win + R
+  2. Escribir: {ruta}
+  3. Presionar Enter
+
+MÉTODO 3: Mapear Unidad de Red
+  1. Clic derecho en "Este equipo" → "Conectar a unidad de red"
+  2. Elegir letra de unidad (ej: Z:)
+  3. Carpeta: {ruta}
+  4. Marcar "Conectar de nuevo al iniciar sesión" (opcional)
+  5. Clic en "Finalizar"
+
+MÉTODO 4: Línea de Comandos (CMD/PowerShell)
+  cmd: net use Z: {ruta} /persistent:yes
+  powershell: New-PSDrive -Name "Z" -PSProvider "FileSystem" -Root "{ruta}"
+
+NOTA: Puede requerir:
+  • Usuario de red válido
+  • Habilitar SMB en Windows (si está deshabilitado)
+  • Agregar el host a redes de confianza
+            """
+        else:  # Linux/macOS
+            instrucciones = f"""
+MÉTODO 1: Explorador de Archivos (Recomendado)
+  1. Abrir explorador de archivos
+  2. Presionar Ctrl+L (GNOME) o F3 (otros)
+  3. Pegar la ruta: {ruta}
+  4. Presionar Enter
+  5. Ingresar credenciales si es necesario
+
+MÉTODO 2: Línea de Comandos
+  # GNOME/Nautilus
+  nautilus '{ruta}'
+  
+  # KDE/Dolphin
+  dolphin '{ruta}'
+  
+  # XFCE/Thunar
+  thunar '{ruta}'
+
+MÉTODO 3: Montar con smbclient
+  smbclient //{ip}/{recurso} -U usuario
+  # Listar archivos: ls
+  # Descargar: get archivo.txt
+  # Subir: put archivo.txt
+
+MÉTODO 4: Montar como sistema de archivos
+  # Crear punto de montaje
+  sudo mkdir -p /mnt/smb_{recurso}
+  
+  # Montar (temporal)
+  sudo mount -t cifs //{ip}/{recurso} /mnt/smb_{recurso} -o username=USUARIO
+  
+  # Montar (permanente en /etc/fstab)
+  //{ip}/{recurso} /mnt/smb_{recurso} cifs username=USUARIO,password=PASS 0 0
+
+REQUISITOS:
+  • Paquetes: smbclient, gvfs-backends (o gvfs-smb)
+  • Ubuntu/Debian: sudo apt install smbclient gvfs-backends
+  • Fedora: sudo dnf install samba-client gvfs-smb
+  • Arch: sudo pacman -S smbclient gvfs-smb
+            """
+        
+        ctk.CTkLabel(
+            instrucciones_frame,
+            text=instrucciones.strip(),
+            font=("Consolas", 9),
+            justify="left",
+            anchor="w"
+        ).pack(padx=8, pady=8, fill="x")
+        
+        # Mensaje de error si existe
+        if error:
+            ctk.CTkLabel(
+                contenedor,
+                text=f"⚠️ Error: {error}",
+                font=("Segoe UI", 9),
+                text_color=("#d32f2f", "#ef5350"),
+                wraplength=540
+            ).pack(pady=(8, 0))
+        
+        # Botón cerrar
+        ctk.CTkButton(
+            contenedor,
+            text="Cerrar",
+            command=ventana.destroy,
+        ).pack(pady=(8, 0))
+    
+    def _copiar_texto(self, texto: str, ventana_padre: Optional[ctk.CTkToplevel] = None) -> None:
+        """Copia texto al portapapeles y muestra confirmación."""
+        try:
+            if ventana_padre:
+                ventana_padre.clipboard_clear()
+                ventana_padre.clipboard_append(texto)
+            else:
+                self.raiz.clipboard_clear()
+                self.raiz.clipboard_append(texto)
+            
+            messagebox.showinfo(
+                "Copiado",
+                "Ruta copiada al portapapeles",
+                parent=ventana_padre if ventana_padre else self.raiz
+            )
+        except Exception as e:
             messagebox.showerror(
-                "Abrir recurso compartido",
-                f"No se pudo abrir {ruta}.\nDetalle: {exc}",
+                "Error",
+                f"No se pudo copiar: {e}",
+                parent=ventana_padre if ventana_padre else self.raiz
             )
 
     def _actualizar_estado_progreso(self) -> None:
@@ -1165,6 +2042,68 @@ class Aplicacion:
             )
         else:
             self.estado.set(self.estado_base)
+
+    def _obtener_ip_publica_inicial(self) -> None:
+        """Obtiene la IP pública al iniciar la aplicación."""
+        def callback(ip: Optional[str], proveedor: str):
+            """Callback para actualizar la UI con la IP pública."""
+            if ip:
+                self.ip_publica = ip
+                self.label_ip_publica.configure(
+                    text=f"🌍 IP Pública: {ip} (vía {proveedor})"
+                )
+                self.boton_copiar_ip.configure(state="normal")
+            else:
+                self.ip_publica = None
+                self.label_ip_publica.configure(
+                    text=f"🌍 IP Pública: {proveedor}",
+                    text_color=("#666666", "#999999")
+                )
+                self.boton_copiar_ip.configure(state="disabled")
+        
+        # Obtener IP pública de forma asíncrona
+        obtener_ip_publica_async(callback, timeout=5)
+    
+    def _actualizar_ip_publica(self) -> None:
+        """Actualiza la IP pública manualmente."""
+        self.label_ip_publica.configure(
+            text="🌍 IP Pública: Actualizando..."
+        )
+        self.boton_copiar_ip.configure(state="disabled")
+        
+        def callback(ip: Optional[str], proveedor: str):
+            """Callback para actualizar la UI con la IP pública."""
+            if ip:
+                self.ip_publica = ip
+                self.label_ip_publica.configure(
+                    text=f"🌍 IP Pública: {ip} (vía {proveedor})"
+                )
+                self.boton_copiar_ip.configure(state="normal")
+            else:
+                self.ip_publica = None
+                self.label_ip_publica.configure(
+                    text=f"🌍 IP Pública: {proveedor}",
+                    text_color=("#666666", "#999999")
+                )
+                self.boton_copiar_ip.configure(state="disabled")
+        
+        # Obtener IP pública de forma asíncrona
+        obtener_ip_publica_async(callback, timeout=5)
+    
+    def _copiar_ip_publica(self) -> None:
+        """Copia la IP pública al portapapeles."""
+        if self.ip_publica:
+            self.raiz.clipboard_clear()
+            self.raiz.clipboard_append(self.ip_publica)
+            
+            # Mostrar confirmación temporal
+            texto_original = self.boton_copiar_ip.cget("text")
+            self.boton_copiar_ip.configure(text="✅ Copiada")
+            
+            def restaurar_texto():
+                self.boton_copiar_ip.configure(text=texto_original)
+            
+            self.raiz.after(2000, restaurar_texto)
 
     def _cargar_imagen_splash(self) -> None:
         """Carga la imagen del splash para usar en la advertencia legal."""
@@ -1198,8 +2137,6 @@ class Aplicacion:
         ventana = ctk.CTkToplevel(self.raiz)
         ventana.title("⚠️ Advertencia Legal")
         ventana.resizable(False, False)
-        ventana.transient(self.raiz)
-        ventana.grab_set()
 
         ancho, alto = 520, 420
         pantalla_ancho = ventana.winfo_screenwidth()
@@ -1207,6 +2144,9 @@ class Aplicacion:
         posicion_x = int((pantalla_ancho - ancho) / 2)
         posicion_y = int((pantalla_alto - alto) / 2)
         ventana.geometry(f"{ancho}x{alto}+{posicion_x}+{posicion_y}")
+        
+        # Configurar como modal de forma segura
+        self._configurar_ventana_modal(ventana)
 
         # Contenedor principal
         contenedor = ctk.CTkFrame(ventana)
@@ -1313,14 +2253,39 @@ class Aplicacion:
         self.entrada_buscar.delete(0, "end")
         self._filtrar_tabla()
 
+    def _abrir_en_navegador(self, ip: str, protocolo: str = "http", puerto: int = 80) -> None:
+        """Abre la dirección IP en el navegador predeterminado del sistema."""
+        try:
+            # Construir URL
+            if (protocolo == "http" and puerto == 80) or (protocolo == "https" and puerto == 443):
+                # Puerto estándar, no incluir en la URL
+                url = f"{protocolo}://{ip}"
+            else:
+                # Puerto no estándar, incluir en la URL
+                url = f"{protocolo}://{ip}:{puerto}"
+            
+            # Abrir en el navegador predeterminado
+            webbrowser.open(url)
+            
+            # Mostrar notificación
+            self.estado.set(f"Abriendo {url} en el navegador...")
+            self.raiz.after(3000, lambda: self.estado.set(self.estado_base))
+            
+        except Exception as e:
+            messagebox.showerror(
+                "Error al abrir navegador",
+                f"No se pudo abrir la dirección en el navegador:\n{e}"
+            )
+
     def _conectar_ssh(self, ip: str) -> None:
         """Abre una conexión SSH al dispositivo seleccionado."""
         ventana = ctk.CTkToplevel(self.raiz)
         ventana.title(f"Conexión SSH - {ip}")
         ventana.geometry("520x480")
         ventana.resizable(False, False)
-        ventana.transient(self.raiz)
-        ventana.grab_set()
+        
+        # Configurar como modal de forma segura
+        self._configurar_ventana_modal(ventana)
 
         # Centrar ventana
         ventana.update_idletasks()
@@ -1490,6 +2455,230 @@ class Aplicacion:
 
         ventana.protocol("WM_DELETE_WINDOW", cerrar)
 
+    def _analizar_dns(self, ip: str) -> None:
+        """Analiza un servidor DNS detectado en el puerto 53."""
+        from networking.dns_analysis import (
+            analizar_servidor_dns,
+            obtener_descripcion_dns,
+            obtener_recomendaciones_seguridad_dns,
+        )
+        
+        ventana = ctk.CTkToplevel(self.raiz)
+        ventana.title(f"Análisis DNS - {ip}")
+        ventana.geometry("700x650")
+        
+        # Configurar como modal de forma segura
+        self._configurar_ventana_modal(ventana)
+
+        # Centrar ventana
+        ventana.update_idletasks()
+        pantalla_ancho = ventana.winfo_screenwidth()
+        pantalla_alto = ventana.winfo_screenheight()
+        ancho = 700
+        alto = 650
+        posicion_x = int((pantalla_ancho - ancho) / 2)
+        posicion_y = int((pantalla_alto - alto) / 2)
+        ventana.geometry(f"{ancho}x{alto}+{posicion_x}+{posicion_y}")
+
+        contenedor = ctk.CTkFrame(ventana)
+        contenedor.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # Encabezado
+        header_frame = ctk.CTkFrame(contenedor, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(0, 12))
+        
+        ctk.CTkLabel(
+            header_frame,
+            text=f"🌐 Análisis de Servidor DNS",
+            font=("Segoe UI", 18, "bold"),
+        ).pack(side="left", anchor="w")
+
+        # IP del servidor
+        ctk.CTkLabel(
+            contenedor,
+            text=f"Dirección IP: {ip}",
+            font=("Segoe UI", 12),
+        ).pack(anchor="w", pady=(0, 8))
+
+        # Label de estado
+        estado_label = ctk.CTkLabel(
+            contenedor,
+            text="🔍 Analizando servidor DNS...",
+            font=("Segoe UI", 11),
+        )
+        estado_label.pack(pady=8)
+
+        # Frame scrollable para resultados
+        scroll_frame = ctk.CTkScrollableFrame(contenedor, height=450)
+        scroll_frame.pack(fill="both", expand=True, pady=(0, 12))
+
+        # Botón de cerrar
+        boton_cerrar = ctk.CTkButton(
+            contenedor,
+            text="Cerrar",
+            command=ventana.destroy,
+            font=("Segoe UI", 11),
+        )
+        boton_cerrar.pack(pady=(0, 0))
+
+        def realizar_analisis():
+            """Realiza el análisis en segundo plano."""
+            try:
+                resultado = analizar_servidor_dns(ip)
+                
+                # Limpiar frame de resultados
+                for widget in scroll_frame.winfo_children():
+                    widget.destroy()
+                
+                if resultado["es_dns"]:
+                    estado_label.configure(
+                        text="✅ Servidor DNS detectado y analizado",
+                        text_color=("#2e7d32", "#43a047")
+                    )
+                    
+                    # Tipo de servidor
+                    tipo_frame = ctk.CTkFrame(scroll_frame)
+                    tipo_frame.pack(fill="x", pady=(0, 12))
+                    
+                    ctk.CTkLabel(
+                        tipo_frame,
+                        text=f"📋 Tipo de servidor: {resultado['tipo_servidor']}",
+                        font=("Segoe UI", 12, "bold"),
+                    ).pack(padx=12, pady=8, anchor="w")
+                    
+                    # Estado de consultas
+                    consultas_text = "✅ Responde a consultas DNS" if resultado["responde_consultas"] else "❌ No responde a consultas DNS"
+                    ctk.CTkLabel(
+                        tipo_frame,
+                        text=consultas_text,
+                        font=("Segoe UI", 10),
+                    ).pack(padx=24, pady=2, anchor="w")
+                    
+                    # Estado de recursión
+                    if resultado["permite_recursion"]:
+                        recursion_text = "⚠️ Permite consultas recursivas (riesgo de seguridad)"
+                        recursion_color = ("#d32f2f", "#ef5350")
+                    else:
+                        recursion_text = "✅ No permite consultas recursivas"
+                        recursion_color = ("#2e7d32", "#43a047")
+                    
+                    ctk.CTkLabel(
+                        tipo_frame,
+                        text=recursion_text,
+                        font=("Segoe UI", 10),
+                        text_color=recursion_color,
+                    ).pack(padx=24, pady=2, anchor="w")
+                    
+                    # Información adicional
+                    if resultado["informacion"]:
+                        info_frame = ctk.CTkFrame(scroll_frame)
+                        info_frame.pack(fill="x", pady=(0, 12))
+                        
+                        ctk.CTkLabel(
+                            info_frame,
+                            text="📊 Información adicional:",
+                            font=("Segoe UI", 12, "bold"),
+                        ).pack(padx=12, pady=8, anchor="w")
+                        
+                        for info in resultado["informacion"]:
+                            ctk.CTkLabel(
+                                info_frame,
+                                text=f"• {info}",
+                                font=("Segoe UI", 10),
+                                wraplength=620,
+                                justify="left",
+                            ).pack(padx=24, pady=2, anchor="w")
+                    
+                    # Recomendaciones de seguridad
+                    if resultado["recomendaciones"]:
+                        rec_frame = ctk.CTkFrame(scroll_frame)
+                        rec_frame.pack(fill="x", pady=(0, 12))
+                        
+                        ctk.CTkLabel(
+                            rec_frame,
+                            text="🔒 Recomendaciones de seguridad:",
+                            font=("Segoe UI", 12, "bold"),
+                        ).pack(padx=12, pady=8, anchor="w")
+                        
+                        for rec in resultado["recomendaciones"]:
+                            ctk.CTkLabel(
+                                rec_frame,
+                                text=f"• {rec}",
+                                font=("Segoe UI", 10),
+                                wraplength=620,
+                                justify="left",
+                            ).pack(padx=24, pady=4, anchor="w")
+                    
+                    # Información general sobre DNS
+                    info_general_frame = ctk.CTkFrame(scroll_frame)
+                    info_general_frame.pack(fill="x", pady=(0, 0))
+                    
+                    ctk.CTkLabel(
+                        info_general_frame,
+                        text="ℹ️ ¿Qué puedes hacer con un servidor DNS?",
+                        font=("Segoe UI", 12, "bold"),
+                    ).pack(padx=12, pady=8, anchor="w")
+                    
+                    desc_texto = """
+• Consultas DNS: Resolver nombres de dominio a IPs
+• Consultas inversas: Convertir IPs a nombres de dominio
+• Verificar registros: MX (correo), TXT (SPF, DKIM), etc.
+• Análisis de seguridad: Detectar configuraciones inseguras
+• Identificar tipo de dispositivo: Router, servidor, controlador de dominio
+
+🔧 Comandos útiles:
+  nslookup google.com {ip}
+  dig @{ip} google.com
+  dig @{ip} version.bind txt chaos (detectar versión)
+  nslookup {ip} (consulta inversa)
+                    """.format(ip=ip)
+                    
+                    ctk.CTkLabel(
+                        info_general_frame,
+                        text=desc_texto,
+                        font=("Segoe UI", 9),
+                        justify="left",
+                    ).pack(padx=24, pady=8, anchor="w")
+                    
+                else:
+                    estado_label.configure(
+                        text="❌ El servidor no responde a consultas DNS",
+                        text_color=("#d32f2f", "#ef5350")
+                    )
+                    
+                    ctk.CTkLabel(
+                        scroll_frame,
+                        text="El puerto 53 está abierto pero el servidor no responde correctamente "
+                             "a consultas DNS. Puede estar:\n\n"
+                             "• Configurado solo para escuchar en interfaces específicas\n"
+                             "• Bloqueado por firewall\n"
+                             "• Utilizando el puerto para otro servicio\n"
+                             "• Requerir autenticación especial",
+                        font=("Segoe UI", 10),
+                        wraplength=600,
+                        justify="left",
+                    ).pack(padx=12, pady=12)
+                    
+            except Exception as e:
+                estado_label.configure(
+                    text=f"❌ Error al analizar: {str(e)}",
+                    text_color=("#d32f2f", "#ef5350")
+                )
+                
+                for widget in scroll_frame.winfo_children():
+                    widget.destroy()
+                
+                ctk.CTkLabel(
+                    scroll_frame,
+                    text=f"Se produjo un error durante el análisis:\n{str(e)}",
+                    font=("Segoe UI", 10),
+                    wraplength=600,
+                    justify="left",
+                ).pack(padx=12, pady=12)
+
+        # Iniciar análisis en hilo separado
+        threading.Thread(target=realizar_analisis, daemon=True).start()
+
     def _mostrar_ayuda_mensajeria(self) -> None:
         """Muestra ayuda sobre errores comunes de mensajería."""
         ayuda_texto = """
@@ -1641,6 +2830,10 @@ Para Linux/Unix:
         if not PYSTRAY_DISPONIBLE:
             return
         
+        # Verificar que las dependencias estén disponibles
+        if Image is None or pystray is None or item is None:
+            return
+        
         # Cargar imagen para el icono de bandeja
         ruta_icono = os.path.join(os.path.dirname(__file__), "img", "splash.png")
         
@@ -1648,17 +2841,17 @@ Para Linux/Unix:
             return
         
         try:
-            # Cargar imagen con PIL
-            icono_imagen = Image.open(ruta_icono)
+            # Cargar imagen con PIL (ya verificado que Image no es None)
+            icono_imagen = Image.open(ruta_icono)  # type: ignore
             
-            # Crear menú del icono
-            menu = pystray.Menu(
-                item('Mostrar/Ocultar', self._toggle_ventana, default=True),
-                item('Salir', self._salir_aplicacion)
+            # Crear menú del icono (ya verificado que pystray e item no son None)
+            menu = pystray.Menu(  # type: ignore
+                item('Mostrar/Ocultar', self._toggle_ventana, default=True),  # type: ignore
+                item('Salir', self._salir_aplicacion)  # type: ignore
             )
             
-            # Crear icono de bandeja
-            self.tray_icon = pystray.Icon(
+            # Crear icono de bandeja (ya verificado que pystray no es None)
+            self.tray_icon = pystray.Icon(  # type: ignore
                 "enreda2",
                 icono_imagen,
                 "enredA2 - Network Scanner",

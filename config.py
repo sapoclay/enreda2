@@ -58,7 +58,6 @@ class Config:
     def get(self, key_path: str, default: Any = None) -> Any:
         """
         Obtiene un valor de configuración usando notación de punto.
-        Ejemplo: config.get("messaging.method")
         """
         keys = key_path.split(".")
         value = self.data
@@ -72,7 +71,6 @@ class Config:
     def set(self, key_path: str, value: Any) -> None:
         """
         Establece un valor de configuración usando notación de punto.
-        Ejemplo: config.set("messaging.method", "powershell")
         """
         keys = key_path.split(".")
         target = self.data

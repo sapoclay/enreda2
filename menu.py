@@ -24,7 +24,7 @@ LOGO_MAX_HEIGHT = 200
 class MenuAplicacion:
     """Configura el menú superior y sus acciones."""
 
-    def __init__(self, raiz: ctk.CTk, app_callbacks: dict = None) -> None:
+    def __init__(self, raiz: ctk.CTk, app_callbacks: Optional[dict] = None) -> None:
         self.raiz = raiz
         self.app_callbacks = app_callbacks or {}
         self.menu_principal = tk.Menu(self.raiz)
@@ -87,7 +87,7 @@ class MenuAplicacion:
         self._cargar_logo()
         if self._logo_ctk is not None:
             etiqueta_logo = ctk.CTkLabel(contenedor, image=self._logo_ctk, text="")
-            etiqueta_logo.image = self._logo_ctk
+            # Mantener referencia en la clase para evitar garbage collection
             etiqueta_logo.pack(pady=(4, 16))
         elif self._logo_tk is not None:
             etiqueta_logo = tk.Label(
@@ -96,7 +96,7 @@ class MenuAplicacion:
                 borderwidth=0,
                 background=color_tk,
             )
-            etiqueta_logo.image = self._logo_tk
+            # Mantener referencia en la clase para evitar garbage collection
             etiqueta_logo.pack(pady=(4, 16))
 
         ctk.CTkLabel(
@@ -243,6 +243,8 @@ class MenuAplicacion:
             ("msg", "Comando MSG (Windows estándar)", "Usa RPC (puerto 135) y SMB (puerto 445)"),
             ("powershell", "PowerShell Remoting", "Usa WinRM (puerto 5985). Requiere configuración."),
             ("ssh_linux", "SSH para Linux/Unix", "Usa SSH (puerto 22). Requiere autenticación por clave."),
+            ("samba_linux", "Samba/NetBIOS (Linux)", "Usa puertos 139/445. Sin autenticación, sin SSH."),
+            ("netcat", "Netcat (Socket TCP)", "Puerto personalizable. Requiere listener en destino."),
         ]
 
         for valor, nombre, descripcion in metodos:
@@ -278,7 +280,11 @@ class MenuAplicacion:
             "• PowerShell: Más moderno y flexible, pero requiere que WinRM esté "
             "habilitado en el dispositivo destino.\n\n"
             "• SSH Linux: Para sistemas Linux/Unix. Requiere SSH habilitado y "
-            "autenticación por clave pública configurada. Usa notify-send o wall."
+            "autenticación por clave pública configurada. Usa notify-send o wall.\n\n"
+            "• Samba/NetBIOS: Para Linux con Samba instalado. NO requiere SSH ni "
+            "autenticación. Usa smbclient -M. Puertos 139/445.\n\n"
+            "• Netcat: Socket TCP directo. Requiere un listener configurado en el "
+            "destino (nc -l -p 9999). Muy flexible pero requiere setup previo."
         )
 
         ctk.CTkLabel(

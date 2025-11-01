@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ipaddress
+import platform
+import re
 import subprocess
 import unicodedata
 from dataclasses import dataclass
@@ -25,8 +27,20 @@ class InterfaceInfo:
 
 
 def obtener_interfaces_locales() -> List[InterfaceInfo]:
-    """Ejecuta ipconfig y devuelve una lista con las interfaces IPv4 activas."""
+    """Detecta y devuelve las interfaces IPv4 activas del sistema."""
+    
+    sistema = platform.system()
+    
+    if sistema == "Windows":
+        return _obtener_interfaces_windows()
+    elif sistema in ("Linux", "Darwin"):  # Darwin es macOS
+        return _obtener_interfaces_linux()
+    else:
+        return []
 
+
+def _obtener_interfaces_windows() -> List[InterfaceInfo]:
+    """Ejecuta ipconfig en Windows y devuelve las interfaces IPv4 activas."""
     try:
         salida = subprocess.check_output(
             ["ipconfig", "/all"],
@@ -38,6 +52,140 @@ def obtener_interfaces_locales() -> List[InterfaceInfo]:
         return []
 
     return list(_parsear_ipconfig(salida.splitlines()))
+
+
+def _obtener_interfaces_linux() -> List[InterfaceInfo]:
+    """Ejecuta comandos de Linux para obtener las interfaces IPv4 activas."""
+    interfaces = []
+    
+    # Primero intentamos con 'ip addr' (comando moderno)
+    try:
+        salida = subprocess.check_output(
+            ["ip", "-4", "addr", "show"],
+            text=True,
+            errors="ignore",
+        )
+        interfaces = list(_parsear_ip_addr(salida))
+        if interfaces:
+            return interfaces
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    
+    # Si falla, intentamos con 'ifconfig' (comando antiguo/tradicional)
+    try:
+        salida = subprocess.check_output(
+            ["ifconfig"],
+            text=True,
+            errors="ignore",
+        )
+        interfaces = list(_parsear_ifconfig(salida))
+        if interfaces:
+            return interfaces
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    
+    return []
+
+
+def _parsear_ip_addr(salida: str) -> Iterable[InterfaceInfo]:
+    """Parsea la salida del comando 'ip addr' de Linux."""
+    lineas = salida.splitlines()
+    interfaz_actual = None
+    
+    for linea in lineas:
+        linea = linea.strip()
+        
+        # Línea de interfaz: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> ..."
+        if ": " in linea and not linea.startswith("inet"):
+            partes = linea.split(":")
+            if len(partes) >= 2:
+                nombre = partes[1].strip()
+                # Ignorar loopback
+                if nombre != "lo":
+                    interfaz_actual = nombre
+        
+        # Línea de dirección IPv4: "inet 192.168.1.100/24 ..."
+        elif linea.startswith("inet ") and interfaz_actual:
+            partes = linea.split()
+            if len(partes) >= 2:
+                direccion_cidr = partes[1]  # Formato: 192.168.1.100/24
+                
+                # Ignorar direcciones APIPA (169.254.x.x)
+                if direccion_cidr.startswith("169.254."):
+                    continue
+                
+                try:
+                    # Separar IP y prefijo
+                    if "/" in direccion_cidr:
+                        ip_str, prefijo_str = direccion_cidr.split("/")
+                        prefijo = int(prefijo_str)
+                        
+                        # Convertir prefijo a máscara de subred
+                        mascara = str(ipaddress.IPv4Network(f"0.0.0.0/{prefijo}", strict=False).netmask)
+                        
+                        yield InterfaceInfo(
+                            nombre=interfaz_actual,
+                            direccion_ip=ip_str,
+                            mascara=mascara
+                        )
+                except (ValueError, ipaddress.AddressValueError):
+                    continue
+
+
+def _parsear_ifconfig(salida: str) -> Iterable[InterfaceInfo]:
+    """Parsea la salida del comando 'ifconfig' de Linux."""
+    lineas = salida.splitlines()
+    interfaz_actual = None
+    ip_actual = None
+    mascara_actual = None
+    
+    for linea in lineas:
+        # Nueva interfaz (no comienza con espacio)
+        if linea and not linea[0].isspace():
+            # Guardar interfaz anterior si tiene datos completos
+            if interfaz_actual and ip_actual and mascara_actual:
+                # Ignorar loopback y direcciones APIPA
+                if interfaz_actual != "lo" and not ip_actual.startswith("169.254."):
+                    yield InterfaceInfo(
+                        nombre=interfaz_actual,
+                        direccion_ip=ip_actual,
+                        mascara=mascara_actual
+                    )
+            
+            # Resetear para nueva interfaz
+            interfaz_actual = linea.split()[0].rstrip(":")
+            ip_actual = None
+            mascara_actual = None
+        
+        # Buscar dirección IPv4
+        elif "inet " in linea and interfaz_actual:
+            # Formato puede ser: "inet 192.168.1.100  netmask 255.255.255.0"
+            # o "inet addr:192.168.1.100  Mask:255.255.255.0"
+            
+            # Buscar IP
+            match_ip = re.search(r'inet\s+(?:addr:)?(\d+\.\d+\.\d+\.\d+)', linea)
+            if match_ip:
+                ip_actual = match_ip.group(1)
+            
+            # Buscar máscara
+            match_mask = re.search(r'(?:netmask|Mask:)\s*(\d+\.\d+\.\d+\.\d+)', linea)
+            if match_mask:
+                mascara_actual = match_mask.group(1)
+            else:
+                # Si no encuentra máscara en formato decimal, buscar en hexadecimal
+                match_hex = re.search(r'(?:netmask|Mask:)\s*(0x[0-9a-fA-F]+)', linea)
+                if match_hex:
+                    hex_mask = int(match_hex.group(1), 16)
+                    mascara_actual = str(ipaddress.IPv4Address(hex_mask))
+    
+    # No olvidar la última interfaz
+    if interfaz_actual and ip_actual and mascara_actual:
+        if interfaz_actual != "lo" and not ip_actual.startswith("169.254."):
+            yield InterfaceInfo(
+                nombre=interfaz_actual,
+                direccion_ip=ip_actual,
+                mascara=mascara_actual
+            )
 
 
 def _parsear_ipconfig(lineas: Iterable[str]) -> Iterable[InterfaceInfo]:

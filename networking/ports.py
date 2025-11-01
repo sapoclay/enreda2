@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from typing import Iterable, List
 
@@ -83,19 +84,33 @@ PUERTOS_EXTENDIDOS: List[int] = sorted(
 )
 
 TIEMPO_ESPERA_SEGUNDOS = 0.4
+MAX_WORKERS_PORTS = 20  # Número de hilos para escaneo de puertos paralelo
 
 
 def escanear_puertos(direccion_ip: str, puertos: Iterable[int] | None = None) -> List[int]:
-    """Devuelve una lista de puertos accesibles mediante TCP en la IP dada."""
-
+    """Devuelve una lista de puertos accesibles mediante TCP en la IP dada (paralelo)."""
     lista = list(puertos) if puertos is not None else PUERTOS_COMUNES
     abiertos: List[int] = []
-
-    for puerto in lista:
-        if _esta_abierto(direccion_ip, puerto):
-            abiertos.append(puerto)
-
-    return abiertos
+    
+    # Optimización: escaneo paralelo de puertos
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS_PORTS) as executor:
+        # Crear diccionario de futuros
+        futures = {
+            executor.submit(_esta_abierto, direccion_ip, puerto): puerto 
+            for puerto in lista
+        }
+        
+        # Procesar resultados
+        for future in as_completed(futures):
+            puerto = futures[future]
+            try:
+                if future.result():
+                    abiertos.append(puerto)
+            except Exception:
+                # Si hay error, asumir puerto cerrado
+                pass
+    
+    return sorted(abiertos)
 
 
 def escanear_puertos_extenso(direccion_ip: str) -> List[int]:
@@ -105,10 +120,18 @@ def escanear_puertos_extenso(direccion_ip: str) -> List[int]:
 
 
 def _esta_abierto(direccion_ip: str, puerto: int) -> bool:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
-        sock.settimeout(TIEMPO_ESPERA_SEGUNDOS)
-        try:
-            sock.connect((direccion_ip, puerto))
-        except (socket.timeout, ConnectionRefusedError, OSError):
-            return False
-    return True
+    """
+    Comprueba si el puerto está abierto en la IP dada.
+    Optimizado con timeout adaptativo y mejor manejo de errores.
+    """
+    # Timeout más agresivo para puertos comunes (más rápidos de escanear)
+    timeout = 0.3 if puerto in PUERTOS_COMUNES else TIEMPO_ESPERA_SEGUNDOS
+    
+    try:
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+            sock.settimeout(timeout)
+            # connect_ex es más eficiente que connect con try/except
+            resultado = sock.connect_ex((direccion_ip, puerto))
+            return resultado == 0
+    except (socket.error, OSError):
+        return False

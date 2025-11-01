@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 import subprocess
 import socket
 from contextlib import closing
@@ -11,6 +12,9 @@ METODO_MSG = "msg"  # Comando msg de Windows (RPC)
 METODO_NET_SEND = "net_send"  # Net send (obsoleto en Windows moderno)
 METODO_POWERSHELL = "powershell"  # PowerShell remoting
 METODO_SSH_LINUX = "ssh_linux"  # SSH para sistemas Linux/Unix
+METODO_SAMBA_LINUX = "samba_linux"  # Mensajes NetBIOS a Linux con Samba
+METODO_NETCAT = "netcat"  # Socket TCP directo (sin autenticación)
+METODO_WRITE_UNIX = "write_unix"  # Protocolo write de Unix (puerto 513)
 
 # Puertos comunes para mensajería
 PUERTO_SMB = 445  # SMB/CIFS
@@ -18,6 +22,9 @@ PUERTO_RPC = 135  # RPC Endpoint Mapper
 PUERTO_NETBIOS = 139  # NetBIOS Session Service
 PUERTO_WINRM = 5985  # Windows Remote Management (PowerShell)
 PUERTO_SSH = 22  # SSH para Linux/Unix
+PUERTO_WRITE = 513  # Write/rlogin
+PUERTO_TALK = 517  # Talk (mensajería Unix antigua)
+PUERTO_NTALK = 518  # New Talk
 
 
 def enviar_mensaje(ip: str, mensaje: str, metodo: str = METODO_MSG, puerto: Optional[int] = None) -> Tuple[bool, str]:
@@ -27,7 +34,7 @@ def enviar_mensaje(ip: str, mensaje: str, metodo: str = METODO_MSG, puerto: Opti
     Args:
         ip: Dirección IP del dispositivo destino
         mensaje: Texto del mensaje a enviar
-        metodo: Método de envío (msg, net_send, powershell, ssh_linux)
+        metodo: Método de envío (msg, net_send, powershell, ssh_linux, samba_linux, netcat, write_unix)
         puerto: Puerto específico a usar (None = puerto por defecto del método)
     
     Returns:
@@ -44,6 +51,12 @@ def enviar_mensaje(ip: str, mensaje: str, metodo: str = METODO_MSG, puerto: Opti
         return _enviar_via_powershell(ip, mensaje)
     elif metodo == METODO_SSH_LINUX:
         return _enviar_via_ssh_linux(ip, mensaje)
+    elif metodo == METODO_SAMBA_LINUX:
+        return _enviar_via_samba_linux(ip, mensaje)
+    elif metodo == METODO_NETCAT:
+        return _enviar_via_netcat(ip, mensaje, puerto or 9999)
+    elif metodo == METODO_WRITE_UNIX:
+        return _enviar_via_write_unix(ip, mensaje)
     else:
         return False, f"Método desconocido: {metodo}"
 
@@ -72,6 +85,10 @@ def _enviar_via_msg(ip: str, mensaje: str) -> Tuple[bool, str]:
     Envía mensaje usando el comando 'msg' de Windows.
     Usa RPC (puerto 135) y SMB (puerto 445).
     """
+    # Verificar que estamos en Windows
+    if platform.system() != "Windows":
+        return False, "El comando 'msg' solo está disponible en Windows. Use SSH para Linux."
+    
     # Primero intentar con el método estándar (requiere sesión activa)
     comando = ["msg", f"/SERVER:{ip}", "*", mensaje]
     
@@ -129,6 +146,10 @@ def _enviar_via_net_send(ip: str, mensaje: str) -> Tuple[bool, str]:
     Envía mensaje usando 'net send' (obsoleto, no funciona en Windows Vista+).
     Incluido solo por compatibilidad histórica.
     """
+    # Verificar que estamos en Windows
+    if platform.system() != "Windows":
+        return False, "El comando 'net send' solo está disponible en Windows."
+    
     comando = ["net", "send", ip, mensaje]
     
     try:
@@ -273,6 +294,145 @@ def _enviar_via_ssh_linux(ip: str, mensaje: str) -> Tuple[bool, str]:
         return False, f"Error inesperado: {str(e)}"
 
 
+def _enviar_via_samba_linux(ip: str, mensaje: str) -> Tuple[bool, str]:
+    """
+    Envía mensaje a un sistema Linux/Unix con Samba usando net send de smbclient.
+    Funciona sin SSH si el sistema tiene Samba instalado y configurado.
+    No requiere autenticación.
+    """
+    # Verificar que smbclient esté disponible
+    try:
+        subprocess.run(
+            ["which", "smbclient"],
+            capture_output=True,
+            check=True,
+            timeout=2
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False, (
+            "smbclient no está instalado en este sistema.\n\n"
+            "Para instalar:\n"
+            "• Ubuntu/Debian: sudo apt install smbclient\n"
+            "• Fedora/RHEL: sudo dnf install samba-client\n"
+            "• Arch: sudo pacman -S smbclient"
+        )
+    
+    # Intentar enviar mensaje usando net send de samba
+    # Nota: net send de samba es diferente del net send de Windows
+    comando = [
+        "smbclient",
+        "-M", ip,  # Modo mensaje
+        "-N",  # Sin contraseña
+        "-I", ip  # IP específica
+    ]
+    
+    try:
+        resultado = subprocess.run(
+            comando,
+            input=mensaje,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+            timeout=10,
+        )
+        
+        if resultado.returncode == 0:
+            return True, "Mensaje enviado a través de Samba/NetBIOS."
+        else:
+            error = resultado.stderr or resultado.stdout or "Error desconocido"
+            if "Connection refused" in error or "No route to host" in error:
+                return False, "No se puede conectar al servicio Samba (puerto 139/445)."
+            elif "not listening" in error.lower() or "not running" in error.lower():
+                return False, "El servicio Samba no está en ejecución en el dispositivo destino."
+            else:
+                return False, f"Error Samba: {error.strip()[:200]}\n\nNota: La mensajería NetBIOS puede estar deshabilitada en el destino."
+    
+    except subprocess.TimeoutExpired:
+        return False, "Timeout al enviar mensaje por Samba."
+    except Exception as e:
+        return False, f"Error inesperado: {str(e)}"
+
+
+def _enviar_via_netcat(ip: str, mensaje: str, puerto: int = 9999) -> Tuple[bool, str]:
+    """
+    Envía mensaje usando netcat (nc) a un puerto TCP específico.
+    Requiere que el destino tenga un listener en ese puerto.
+    
+    Útil para sistemas Linux sin SSH donde se puede configurar un listener:
+    En el destino ejecutar: nc -l -p 9999 | xargs -I {} notify-send "Mensaje" "{}"
+    """
+    # Verificar que netcat esté disponible
+    nc_cmd = None
+    for cmd in ["nc", "netcat", "ncat"]:
+        try:
+            subprocess.run(
+                ["which", cmd],
+                capture_output=True,
+                check=True,
+                timeout=2
+            )
+            nc_cmd = cmd
+            break
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    
+    if not nc_cmd:
+        return False, (
+            "netcat no está instalado en este sistema.\n\n"
+            "Para instalar:\n"
+            "• Ubuntu/Debian: sudo apt install netcat\n"
+            "• Fedora/RHEL: sudo dnf install nmap-ncat\n"
+            "• Arch: sudo pacman -S openbsd-netcat\n\n"
+            "Nota: En el destino debe haber un listener configurado:\n"
+            "nc -l -p 9999 | while read msg; do notify-send 'Red' \"$msg\"; done"
+        )
+    
+    # Enviar mensaje por netcat
+    comando = [nc_cmd, "-w", "3", ip, str(puerto)]
+    
+    try:
+        resultado = subprocess.run(
+            comando,
+            input=mensaje,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+            timeout=5,
+        )
+        
+        # Netcat no siempre indica error claramente
+        if "Connection refused" in (resultado.stderr or ""):
+            return False, f"No hay listener en el puerto {puerto} del dispositivo destino.\n\nEn el destino ejecutar:\nnc -l -p {puerto} | xargs -I {{}} notify-send 'Mensaje' '{{}}'"
+        
+        # Si no hubo error de conexión, asumimos éxito
+        return True, f"Mensaje enviado al puerto {puerto}.\n\nNota: Verifique que el destino tenga un listener configurado."
+    
+    except subprocess.TimeoutExpired:
+        return False, f"Timeout al conectar al puerto {puerto}."
+    except Exception as e:
+        return False, f"Error inesperado: {str(e)}"
+
+
+def _enviar_via_write_unix(ip: str, mensaje: str) -> Tuple[bool, str]:
+    """
+    Intenta usar el protocolo 'write' de Unix (puerto 513).
+    Protocolo antiguo, generalmente deshabilitado por seguridad.
+    """
+    return False, (
+        "El protocolo 'write' (puerto 513) está obsoleto y deshabilitado en sistemas modernos por seguridad.\n\n"
+        "Alternativas recomendadas:\n"
+        "• SSH: Más seguro, requiere autenticación\n"
+        "• Netcat: Requiere configurar listener en destino\n"
+        "• Samba: Si el sistema tiene Samba instalado\n\n"
+        "Para habilitar write (NO RECOMENDADO):\n"
+        "En el destino: sudo systemctl enable rlogin.socket"
+    )
+
+
 def verificar_disponibilidad_mensajeria(ip: str, puertos: Optional[list[int]] = None) -> Tuple[bool, list[int]]:
     """
     Verifica si el dispositivo puede recibir mensajes comprobando puertos comunes.
@@ -285,7 +445,7 @@ def verificar_disponibilidad_mensajeria(ip: str, puertos: Optional[list[int]] = 
         Tupla (tiene_algún_puerto_abierto: bool, lista_puertos_abiertos: list[int])
     """
     if puertos is None:
-        puertos = [PUERTO_SMB, PUERTO_RPC, PUERTO_NETBIOS, PUERTO_WINRM, PUERTO_SSH]
+        puertos = [PUERTO_SMB, PUERTO_RPC, PUERTO_NETBIOS, PUERTO_WINRM, PUERTO_SSH, PUERTO_WRITE, PUERTO_TALK, PUERTO_NTALK]
     
     puertos_abiertos = []
     
@@ -349,20 +509,52 @@ def obtener_info_mensajeria() -> str:
     return """
 Sistema de Mensajería de Red
 
-REQUISITOS:
+MÉTODOS DISPONIBLES PARA WINDOWS:
+• msg (RPC): Servicio nativo de Windows (requiere RPC activo)
+• PowerShell: Remoting de PowerShell (requiere WinRM)
+• Net Send: Obsoleto en Windows modernos
+
+MÉTODOS DISPONIBLES PARA LINUX:
+• SSH: Más seguro y común (requiere autenticación por clave)
+  - Usa notify-send o wall para mostrar mensajes
+  - Puerto 22 debe estar abierto
+  
+• Samba/NetBIOS: Sin autenticación (si Samba está instalado)
+  - Funciona si el sistema tiene Samba configurado
+  - Puertos 139/445 deben estar abiertos
+  - Comando: smbclient -M <ip>
+  
+• Netcat: Socket TCP directo (requiere listener en destino)
+  - Muy flexible, cualquier puerto
+  - Destino debe ejecutar: nc -l -p 9999 | xargs notify-send 'Msg'
+  - NO requiere autenticación pero SÍ configuración previa
+
+REQUISITOS GENERALES:
 • Ambos equipos deben estar en la misma red local
-• El equipo destino debe ser Windows
-• El servicio 'Messenger' debe estar habilitado en el destino
-• Se requieren permisos administrativos para enviar mensajes
+• El firewall no debe bloquear los puertos necesarios
+• Para Linux: El destino debe tener herramientas de notificación
 
-LIMITACIONES:
-• Solo funciona con dispositivos Windows
-• El mensaje aparece como notificación del sistema
-• Algunos firewalls pueden bloquear los mensajes
-• Windows 10/11 pueden tener este servicio deshabilitado por defecto
+RECOMENDACIONES DE SEGURIDAD:
+• SSH: Más seguro, usar autenticación por clave
+• Samba: Sin autenticación, solo en redes confiables
+• Netcat: Sin cifrado, solo para pruebas/desarrollo
 
-NOTA:
-En versiones modernas de Windows (10/11), el servicio de mensajería
-puede estar deshabilitado por seguridad. El destinatario debe tenerlo
-habilitado manualmente para recibir mensajes.
+CONFIGURACIÓN EN DESTINO LINUX:
+
+Para SSH (recomendado):
+  1. sudo systemctl enable ssh
+  2. Copiar clave pública: ssh-copy-id user@destino
+  3. Instalar notify-send: sudo apt install libnotify-bin
+
+Para Samba:
+  1. sudo apt install samba
+  2. Habilitar mensajería en /etc/samba/smb.conf:
+     [global]
+     message command = /usr/bin/notify-send "%f" "%s"
+
+Para Netcat:
+  1. Crear servicio systemd o ejecutar manualmente:
+     nc -l -p 9999 | while read msg; do 
+       notify-send "Mensaje de red" "$msg"
+     done
 """

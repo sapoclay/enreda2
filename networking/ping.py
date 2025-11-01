@@ -1,18 +1,40 @@
 from __future__ import annotations
 
 import ipaddress
+import platform
 import socket
 import subprocess
+from functools import lru_cache
 from typing import Optional, Tuple
 
 
 TIEMPO_ESPERA_MS = 400
 
+# Caché para resultados de DNS (mejora rendimiento)
+@lru_cache(maxsize=256)
+def _resolver_dns_cached(direccion_ip: str) -> Optional[str]:
+    """Versión cacheada de resolución DNS."""
+    try:
+        nombre, _, _ = socket.gethostbyaddr(direccion_ip)
+        return nombre
+    except (socket.herror, socket.gaierror, TimeoutError):
+        return None
+
 
 def ping_host(direccion_ip: str) -> Tuple[bool, Optional[int]]:
     """Ejecuta un ping rápido y devuelve una tupla (activo, ttl)."""
 
-    comando = ["ping", "-n", "1", "-w", str(TIEMPO_ESPERA_MS), direccion_ip]
+    # Detectar sistema operativo para usar los parámetros correctos
+    sistema = platform.system()
+    
+    if sistema == "Windows":
+        # Windows: -n (count), -w (timeout en ms)
+        comando = ["ping", "-n", "1", "-w", str(TIEMPO_ESPERA_MS), direccion_ip]
+    else:
+        # Linux/Unix/macOS: -c (count), -W (timeout en segundos)
+        timeout_segundos = max(1, TIEMPO_ESPERA_MS // 1000)
+        comando = ["ping", "-c", "1", "-W", str(timeout_segundos), direccion_ip]
+    
     try:
         resultado = subprocess.run(
             comando,
@@ -53,11 +75,11 @@ def resolver_nombre(direccion_ip: str) -> Optional[str]:
 
 
 def _resolver_por_dns(direccion_ip: str) -> Optional[str]:
-    try:
-        nombre, _, _ = socket.gethostbyaddr(direccion_ip)
-    except (socket.herror, socket.gaierror, TimeoutError):
-        return None
-    return _normalizar_nombre(nombre)
+    """Resuelve nombre usando DNS (con caché)."""
+    nombre = _resolver_dns_cached(direccion_ip)
+    if nombre:
+        return _normalizar_nombre(nombre)
+    return None
 
 
 def _resolver_por_fqdn(direccion_ip: str) -> Optional[str]:
@@ -67,12 +89,17 @@ def _resolver_por_fqdn(direccion_ip: str) -> Optional[str]:
 
 def _resolver_por_nslookup(direccion_ip: str) -> Optional[str]:
     comando = ["nslookup", direccion_ip]
+    
+    # Determinar encoding según el sistema operativo
+    sistema = platform.system()
+    encoding = "cp850" if sistema == "Windows" else "utf-8"
+    
     try:
         resultado = subprocess.run(
             comando,
             capture_output=True,
             text=True,
-            encoding="cp850",
+            encoding=encoding,
             errors="ignore",
             timeout=3,
             check=False,
@@ -98,13 +125,24 @@ def _resolver_por_nslookup(direccion_ip: str) -> Optional[str]:
 
 
 def _resolver_por_nbtstat(direccion_ip: str) -> Optional[str]:
-    comando = ["nbtstat", "-A", direccion_ip]
+    # nbtstat es específico de Windows, en Linux se puede usar nmblookup
+    sistema = platform.system()
+    
+    if sistema == "Windows":
+        comando = ["nbtstat", "-A", direccion_ip]
+        encoding = "cp850"
+    else:
+        # En Linux, usar nmblookup (parte de samba-common-bin)
+        # Si no está instalado, simplemente retornará None
+        comando = ["nmblookup", "-A", direccion_ip]
+        encoding = "utf-8"
+    
     try:
         resultado = subprocess.run(
             comando,
             capture_output=True,
             text=True,
-            encoding="cp850",
+            encoding=encoding,
             errors="ignore",
             timeout=3,
             check=False,
@@ -120,7 +158,7 @@ def _resolver_por_nbtstat(direccion_ip: str) -> Optional[str]:
         if not linea_limpia or "<" not in linea_limpia:
             continue
         linea_min = linea_limpia.lower()
-        if linea_min.startswith("nombre"):
+        if linea_min.startswith("nombre") or linea_min.startswith("name"):
             continue
         if "<00>" not in linea_min and "<20>" not in linea_min:
             continue
