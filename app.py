@@ -2115,7 +2115,7 @@ REQUISITOS:
         if Image is not None:
             try:
                 imagen_base = Image.open(ruta_imagen)
-                # Redimensionar a tamaño pequeño (máximo 80x80)
+                # Redimensionar a tamaño pequeño
                 max_size = 80
                 escala = min(max_size / imagen_base.width, max_size / imagen_base.height, 1.0)
                 ancho = max(int(imagen_base.width * escala), 1)
