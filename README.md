@@ -113,6 +113,7 @@
 ### Sistema Operativo
 
 - Windows 10 / 11 (64-bit)
+- Debian / Ubuntu
 - Permisos de administrador (recomendado para algunas funcionalidades)
 
 ### Software
@@ -300,17 +301,7 @@ Opciones → Preferencias → Pestaña "💬 Mensajería" → Seleccionar métod
 
 ---
 
-## 📚 Documentación
-
-La aplicación incluye documentación completa en archivos Markdown:
-
-- **[CHANGELOG.md](CHANGELOG.md)** - Historial de cambios y nuevas funcionalidades
-- **[INSTRUCCIONES_NMAP.md](INSTRUCCIONES_NMAP.md)** - Instalación y uso de Nmap
-- **[SOLUCION_PROBLEMAS_MENSAJERIA.md](SOLUCION_PROBLEMAS_MENSAJERIA.md)** - Guía de errores comunes de mensajería
-- **[GUIA_CONEXION_SSH.md](GUIA_CONEXION_SSH.md)** - Guía completa de conexiones SSH
-- **[ICONO_BANDEJA.md](ICONO_BANDEJA.md)** - Uso del icono de bandeja del sistema
-
-### Ayuda integrada
+## Ayuda integrada
 
 La aplicación incluye ayuda contextual:
 - **❓ Ayuda de mensajería** - En ventana de envío de mensajes
@@ -478,3 +469,4 @@ Esta herramienta está diseñada para uso legítimo en redes de tu propiedad o c
 [⬆ Volver arriba](#-enreda2---network-scanner)
 
 </div>
+
